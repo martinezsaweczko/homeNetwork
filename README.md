@@ -148,6 +148,87 @@ Output:
 - Review sanitized files before commit.
 - If a secret is ever exposed, rotate it immediately.
 
+## Troubleshooting Guide
+
+### DHCP Not Working with Multiple Bonding Cables
+
+#### Symptom
+When bonding multiple cables between a MikroTik router and a managed switch:
+- ✅ Static IPs work fine
+- ✅ Ping works fine
+- ❌ DHCP Discover fails (no lease obtained)
+- ✅ Single cable works perfectly
+
+#### Root Cause
+This issue typically occurs when there is a **mismatch between link aggregation modes** on the two devices:
+
+| Device       | Configuration                    | Negotiation                              |
+|--------------|----------------------------------|------------------------------------------|
+| **MikroTik** | `mode=802.3ad` (LACP)            | Expects dynamic negotiation with partner |
+| **Switch**   | Static Port Trunk / Port Bonding | **No LACP handshake**                    |
+
+Many inexpensive switches (e.g., Realtek-based) have **two separate features**:
+1. **Static Trunk / Port Trunk** – Groups ports without protocol negotiation
+2. **LACP / 802.3ad** – Dynamic link aggregation (separate menu/page on most switches)
+
+When the switch uses static trunking while MikroTik expects LACP, broadcasts (like DHCP Discover) are often the first to fail because the trunk isn't agreed upon properly between both ends.
+
+#### Solution
+
+**Step 1:** Verify your switch configuration.
+Check if your switch has a separate **LACP**, **Link Aggregation**, or **802.3ad** menu page.
+- **If it does:** Enable LACP on the switch trunk and keep MikroTik's `mode=802.3ad`.
+- **If it doesn't:** Proceed to Step 2.
+
+**Step 2:** Change MikroTik bonding mode from LACP to static aggregation.
+
+Update your bonding interface to use `balance-xor` mode (designed for static trunks):
+
+```
+/interface bonding
+set LAG-SWITCH-V2 mode=balance-xor transmit-hash-policy=layer-2-and-3
+```
+
+Or in separate commands:
+```
+/interface bonding
+set LAG-SWITCH-V2 mode=balance-xor
+set LAG-SWITCH-V2 transmit-hash-policy=layer-2-and-3
+```
+
+**Explanation of parameters:**
+- `mode=balance-xor` – Distributes traffic using XOR of MAC addresses; works with static trunks
+- `transmit-hash-policy=layer-2-and-3` – Better distribution than `layer-2` alone; uses MAC + IP to select outgoing port
+
+**Step 3 (Optional):** Verify bonding status.
+Run:
+```
+/interface bonding monitor LAG-SWITCH-V2 once
+```
+
+- **With LACP:** You'll see `actor-key`, `partner-key`, and detailed state information
+- **Without LACP:** You'll only see `active-port` and `inactive-port` — confirming static mode
+
+#### Why DHCP Fails First
+
+DHCP is **broadcast traffic**:
+```
+Source: 0.0.0.0
+Destination: 255.255.255.255
+Flags: BROADCAST
+```
+
+When a trunk isn't properly negotiated:
+- **Unicast traffic** (ping, SSH) may work because it flows through one cable at a time
+- **Broadcast traffic** (DHCP Discover, ARP broadcasts) fails because:
+  - The trunk may not properly flood frames across all bundled ports
+  - Frames may be duplicated or dropped inconsistently
+  - The switch and MikroTik disagree on trunk membership
+
+Removing the bond and using a single cable bypasses the trunk entirely, which is why single-cable configurations work.
+
+---
+
 ## Professionalization Roadmap (Practical)
 
 1. Keep **single NAT boundary** at ISP edge router.
