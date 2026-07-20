@@ -27,6 +27,8 @@ Completed:
   - VLAN10 MGMT (`172.26.10.1/24`)
   - VLAN20 SERVERS (`172.26.20.1/24`)
   - VLAN30 USERS (`172.26.30.1/24`)
+- [x] Fixed overlapping subnet issue on ISP router (changed from `/19` to `/24`).
+- [x] Added firewall rules on backend router to allow ISP network traffic to VLANs.
 
 Pending:
 - [ ] Managed switch bring-up and trunk activation on backend `ether2`.
@@ -106,6 +108,33 @@ flowchart TD
 - `.env`
   Local credentials file (ignored by git).
 
+## Configuration Backup History
+
+### 2026-07-20 21:12:12 UTC
+**File:** `isp-20260720-211212.sanitized.rsc` / `backend-20260720-211212.sanitized.rsc`
+
+**Changes Applied:**
+1. **ISP Router Subnet Fix**: Changed ISP network from `/19` to `/24`
+   - Previous: `172.26.0.1/19` (covered 172.26.0.0 – 172.26.31.255)
+   - Current: `172.26.0.1/24` (covers only 172.26.0.0 – 172.26.0.255)
+   - **Reason:** Overlapping netmask was preventing clients from routing to VLAN networks via gateway
+   - **Impact:** Clients now correctly identify VLAN20, VLAN30, etc. as non-local and route through gateway
+
+2. **Backend Router Firewall Rules Added**: Allow ISP network traffic to VLANs 20 & 30
+   - Rule: `Allow from ISP to VLAN20 via uplink` (dst-address 172.26.20.0/24, in-interface UPLINK-A)
+   - Rule: `Allow ISP network to VLAN20` (src 172.26.0.0/16 → dst 172.26.20.0/24)
+   - Rule: `Allow from ISP to VLAN30 via uplink` (dst-address 172.26.30.0/24, in-interface UPLINK-A)
+   - Rule: `Allow ISP network to VLAN30` (src 172.26.0.0/16 → dst 172.26.30.0/24)
+   - **Reason:** Enable SSH and other services from ISP network to VLAN20/30 devices
+   - **Impact:** Connectivity from ISP clients to VLAN20 devices (e.g., 172.26.20.254) now works
+
+**Testing Verified:**
+- ✅ `ping 172.26.20.254` from ISP client succeeds
+- ✅ `ssh admin@172.26.20.254` from ISP client succeeds
+- ✅ Backend router can ping VLAN20 devices directly
+
+---
+
 ## Automated Router Backup & Sanitization
 
 The script connects to:
@@ -165,7 +194,7 @@ This issue typically occurs when there is a **mismatch between link aggregation 
 | Device       | Configuration                    | Negotiation                              |
 |--------------|----------------------------------|------------------------------------------|
 | **MikroTik** | `mode=802.3ad` (LACP)            | Expects dynamic negotiation with partner |
-| **Switch**   | Static Port Trunk / Port Bonding | **No LACP handshake**                    |
+| **Switch** LG-SWG24-WEB  | Static Port Trunk / Port Bonding | **No LACP handshake**                    |
 
 Many inexpensive switches (e.g., Realtek-based) have **two separate features**:
 1. **Static Trunk / Port Trunk** – Groups ports without protocol negotiation
