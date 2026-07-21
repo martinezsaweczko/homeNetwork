@@ -14,10 +14,9 @@ Current high-level approach:
 ## Current Migration Status
 
 Completed:
-- [x] Removed backend double-NAT (`srcnat masquerade` on backend disabled).
-- [x] Moved WAN publishing to ISP router directly to final server (`172.26.32.250` ports `443` and `4000`).
 - [x] Disabled legacy chained NAT path to backend transit IP (`172.26.40.2`) on ISP.
 - [x] Disabled legacy backend `dstnat` publish rules from `UPLINK-A`.
+- [x] Moved WAN publishing on ISP to VLAN20 webserver (`172.26.20.254`, ports `443` and `4000`).
 - [x] Added/cleaned static routes on ISP to Room B networks via `172.26.40.2`:
   - `172.26.10.0/24`
   - `172.26.20.0/24`
@@ -29,70 +28,171 @@ Completed:
   - VLAN30 USERS (`172.26.30.1/24`)
 - [x] Fixed overlapping subnet issue on ISP router (changed from `/19` to `/24`).
 - [x] Added firewall rules on backend router to allow ISP network traffic to VLANs.
+- [x] Backend LAG to managed switch (`LAG-SWITCH-V2`, `balance-xor`, ether7–10).
+- [x] Bridge VLAN filtering on backend (`BRIDGE-LAN`) with tagged trunk on LAG.
 
 Pending:
-- [ ] Managed switch bring-up and trunk activation on backend `ether2`.
-- [ ] Access port assignment per VLAN on managed switch.
+- [ ] Disable backend `srcnat masquerade` on `UPLINK-A` (still active → double NAT today).
+- [ ] Access port assignment / validation per VLAN on managed switch.
 - [ ] Inter-VLAN firewall policy (default deny + explicit allow rules).
-- [ ] Gradual server/client migration from legacy subnet to VLANs.
+- [ ] Gradual server/client migration from legacy subnet (`172.26.32.0/24`) to VLANs.
+- [ ] Align ISP DHCP pool ranges with `/24` network (pool still spans old `/19` range).
 
 ## Live Topology Snapshot (Latest Router Exports)
 
+Source: `config/sanitized/*-20260720-211212.sanitized.rsc`
+
 ```mermaid
-flowchart TD
-    I[🌐 Internet] --> A[🛡️ ISP Router\n172.26.0.1\nPPPoE VLAN_DIGI + NAT]
-    A -->|Transit /30\n172.26.40.1 <-> 172.26.40.2| B[🧭 Backend Router\n172.26.32.1]
+flowchart TB
+    subgraph WAN["WAN edge"]
+        I[Internet]
+        ONT[ONT / ISP fiber]
+        I --- ONT
+    end
 
-    A -->|WAN dst-nat 443,4000| S250[🖥️ Server\n172.26.32.250]
-    A -->|Static routes via 172.26.40.2| R10[🛠️ MGMT NET\n172.26.10.0/24]
-    A -->|Static routes via 172.26.40.2| R20[🗄️ SERVERS NET\n172.26.20.0/24]
-    A -->|Static routes via 172.26.40.2| R30[👥 USERS NET\n172.26.30.0/24]
-    A -->|Static route via 172.26.40.2| R32[📦 LEGACY NET\n172.26.32.0/24]
+    subgraph RoomA["Room A — ISP Router RB4011 Internet Router"]
+        DIGI["PPPoE Digi\nvia VLAN_DIGI id 20 on WAN ether1\nadd-default-route + peer DNS"]
+        A["ISP Router\nidentity: Internet Router"]
+        ETHB["ETH-BRIDGE\n172.26.0.1/24\nDHCP + DNS"]
+        A4["ether4\n172.26.40.1/30\nLink to Router B"]
+        ONT --> DIGI --> A
+        A --- ETHB
+        A --- A4
+        LAN0["Room A LAN clients\n172.26.0.0/24\nether2,3,5–10 on bridge"]
+        ETHB --- LAN0
+        PI["pi.martinez-saweczko.es\n172.26.0.25"]
+        ETHB --- PI
+    end
 
-    B --> L32[📦 Legacy BRIDGE-LAN\n172.26.32.0/24]
-    B -->|VLAN GW| V10[🛠️ VLAN10-MGMT\n172.26.10.1/24]
-    B -->|VLAN GW| V20[🗄️ VLAN20-SERVERS\n172.26.20.1/24]
-    B -->|VLAN GW| V30[👥 VLAN30-USERS\n172.26.30.1/24]
-    B -->|Prepared trunk on ether2\nTagged 10,20,30| SW[🖧 Managed Switch\npending power/link]
+    subgraph Transit["Transit link /30"]
+        T["172.26.40.0/30\nA: 172.26.40.1 ↔ B: 172.26.40.2"]
+    end
 
-    classDef edge fill:#1f2937,color:#ffffff,stroke:#60a5fa,stroke-width:2px;
-    classDef router fill:#0b3d2e,color:#ffffff,stroke:#34d399,stroke-width:2px;
-    classDef net fill:#172554,color:#ffffff,stroke:#60a5fa,stroke-width:1.5px;
-    classDef server fill:#3f1d2e,color:#ffffff,stroke:#f472b6,stroke-width:1.5px;
-    classDef switch fill:#3a2e0b,color:#ffffff,stroke:#fbbf24,stroke-width:1.5px;
+    subgraph RoomB["Room B — Backend Router RB4011 MikroRouter"]
+        B["Backend Router\nidentity: MikroRouter"]
+        UA["UPLINK-A ether1\n172.26.40.2/30\ndefault GW 172.26.40.1"]
+        BL["BRIDGE-LAN\nvlan-filtering=yes\n172.26.32.1/24 legacy"]
+        V10["VLAN10-MGMT\n172.26.10.1/24\nDHCP 10.100–10.254"]
+        V20["VLAN20-GW SERVERS\n172.26.20.1/24\nDHCP 20.100–20.254"]
+        V30["VLAN30-USERS\n172.26.30.1/24\nDHCP 30.100–30.254"]
+        LAG["LAG-SWITCH-V2\nbalance-xor\nslaves ether7–10\ntagged trunk 10,20,30"]
+        E2["ether2/3 access\nPVID 10 untagged"]
+        E5["ether5 access\nPVID 20 untagged"]
+        B --- UA
+        B --- BL
+        BL --- V10
+        BL --- V20
+        BL --- V30
+        BL --- LAG
+        BL --- E2
+        BL --- E5
+    end
 
-    class I edge;
-    class A,B router;
-    class R10,R20,R30,R32,L32,V10,V20,V30 net;
-    class S250 server;
-    class SW switch;
+    subgraph Switch["Managed switch"]
+        SW["Switch L2\nMGMT 172.26.10.250"]
+        SW10["VLAN 10 access ports"]
+        SW20["VLAN 20 access ports"]
+        SW30["VLAN 30 access ports"]
+        SW --- SW10
+        SW --- SW20
+        SW --- SW30
+    end
+
+    subgraph Hosts["Key hosts"]
+        WEB["Webserver / services\n172.26.20.254\nDNS: server, registry,\nperiodico, impresora"]
+        FED["Fedora Server\n172.26.20.250"]
+        LEG["Legacy / PXE path\n172.26.32.250 next-server\nleases e.g. .130 .240"]
+    end
+
+    A4 --> T --> UA
+    LAG --> SW
+    SW20 --> WEB
+    SW20 --> FED
+    BL -.-> LEG
+
+    DIGI -->|"dst-nat WAN TCP 443,4000\n→ 172.26.20.254:443"| WEB
+    A -->|"static routes via 172.26.40.2"| V10
+    A -->|"static routes via 172.26.40.2"| V20
+    A -->|"static routes via 172.26.40.2"| V30
+    A -->|"static route via 172.26.40.2"| BL
+
+    classDef edge fill:#1f2937,color:#fff,stroke:#60a5fa,stroke-width:2px;
+    classDef router fill:#0b3d2e,color:#fff,stroke:#34d399,stroke-width:2px;
+    classDef net fill:#172554,color:#fff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef host fill:#3f1d2e,color:#fff,stroke:#f472b6,stroke-width:1.5px;
+    classDef switch fill:#3a2e0b,color:#fff,stroke:#fbbf24,stroke-width:1.5px;
+    classDef lag fill:#422006,color:#fff,stroke:#fb923c,stroke-width:1.5px;
+
+    class I,ONT,DIGI edge;
+    class A,B,ETHB,A4,UA,BL router;
+    class V10,V20,V30,LAN0,T net;
+    class WEB,FED,LEG,PI host;
+    class SW,SW10,SW20,SW30 switch;
+    class LAG,E2,E5 lag;
 ```
 
+### Addressing & L3 summary
+
+| Segment | CIDR | Gateway / device | Notes |
+|--------|------|------------------|--------|
+| Room A LAN | `172.26.0.0/24` | ISP `172.26.0.1` on `ETH-BRIDGE` | DHCP + DNS on ISP |
+| Transit A↔B | `172.26.40.0/30` | A `ether4` / B `UPLINK-A` | Point-to-point |
+| VLAN10 MGMT | `172.26.10.0/24` | Backend `172.26.10.1` | Switch MGMT `172.26.10.250` |
+| VLAN20 SERVERS | `172.26.20.0/24` | Backend `172.26.20.1` | WAN publish target `.254` |
+| VLAN30 USERS | `172.26.30.0/24` | Backend `172.26.30.1` | |
+| Legacy LAN | `172.26.32.0/24` | Backend `172.26.32.1` on `BRIDGE-LAN` | Still active |
+
+### Routing & NAT (as of export)
+
+| Item | State |
+|------|--------|
+| ISP default route | PPPoE `Digi` (`add-default-route=yes`) |
+| ISP → rack nets | Static via `172.26.40.2` for `10/20/30/32` |
+| Backend default route | `0.0.0.0/0` → `172.26.40.1` |
+| ISP edge NAT | `srcnat masquerade` out `Digi` **active** |
+| ISP WAN dst-nat | `443,4000` → `172.26.20.254:443` **active** |
+| ISP legacy dst-nat to `172.26.40.2` / `172.26.32.250` | **disabled** |
+| Backend `srcnat masquerade` out `UPLINK-A` | **still active** (double NAT) |
+| Backend legacy `dstnat` from uplink | **disabled** |
+
+### L2 / switch path (backend)
+
+| Port / iface | Role |
+|--------------|------|
+| `UPLINK-A` (`ether1`) | To ISP `ether4` |
+| `ether2`, `ether3` | Access VLAN10 (PVID 10) |
+| `ether5` | Access VLAN20 (PVID 20) |
+| `LAG-SWITCH-V2` (`ether7–10`, `balance-xor`) | Tagged trunk VLANs 10,20,30 to managed switch |
+
 Notes from latest exports:
-- Backend `srcnat masquerade` is disabled (no double NAT).
-- Backend legacy `dstnat` rules are disabled.
-- ISP old forwarding to `172.26.40.2` is disabled; direct forwarding to `172.26.32.250` is active.
+- WAN services publish straight to VLAN20 host `172.26.20.254` (not legacy `172.26.32.250`).
+- Backend still masquerades toward ISP uplink — remove when pure routed path is fully trusted.
+- Backend legacy `dstnat` rules remain present but disabled.
+- ISP DHCP network is `/24`, but pool `dhcp_pool0` still lists `172.26.0.2–172.26.31.254` (cleanup pending).
 
 ## Target Network Design (After Switch/VLAN Cutover)
 
 ```mermaid
 flowchart TD
-    I2[🌐 Internet] --> A2[🛡️ Room A ISP Router\nWAN + NAT + WAN Firewall]
-    A2 -->|Transit /30\n172.26.40.1 <-> 172.26.40.2| B2[🧭 Room B Rack Router\nInter-VLAN Routing + LAN Firewall]
-    B2 -->|802.1Q trunk on ether2\nTagged: 10,20,30| S2[🖧 Managed Switch]
-    S2 --> M2[🛠️ VLAN 10 - MGMT\n172.26.10.0/24]
-    S2 --> V202[🗄️ VLAN 20 - SERVERS\n172.26.20.0/24]
-    S2 --> U2[👥 VLAN 30 - USERS\n172.26.30.0/24]
+    I2[Internet] --> A2[Room A ISP Router\nWAN + single NAT + WAN firewall]
+    A2 -->|Transit /30\n172.26.40.1 ↔ 172.26.40.2\nno NAT on backend| B2[Room B rack router\nInter-VLAN routing + LAN firewall]
+    B2 -->|LAG trunk tagged 10,20,30\nbalance-xor or LACP| S2[Managed switch]
+    S2 --> M2[VLAN 10 MGMT\n172.26.10.0/24]
+    S2 --> V202[VLAN 20 SERVERS\n172.26.20.0/24]
+    S2 --> U2[VLAN 30 USERS\n172.26.30.0/24]
+    V202 --> W2[Published services\n172.26.20.254]
 
-    classDef edge2 fill:#1f2937,color:#ffffff,stroke:#60a5fa,stroke-width:2px;
-    classDef router2 fill:#0b3d2e,color:#ffffff,stroke:#34d399,stroke-width:2px;
-    classDef switch2 fill:#3a2e0b,color:#ffffff,stroke:#fbbf24,stroke-width:1.5px;
-    classDef vlan2 fill:#172554,color:#ffffff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef edge2 fill:#1f2937,color:#fff,stroke:#60a5fa,stroke-width:2px;
+    classDef router2 fill:#0b3d2e,color:#fff,stroke:#34d399,stroke-width:2px;
+    classDef switch2 fill:#3a2e0b,color:#fff,stroke:#fbbf24,stroke-width:1.5px;
+    classDef vlan2 fill:#172554,color:#fff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef host2 fill:#3f1d2e,color:#fff,stroke:#f472b6,stroke-width:1.5px;
 
     class I2 edge2;
     class A2,B2 router2;
     class S2 switch2;
     class M2,V202,U2 vlan2;
+    class W2 host2;
 ```
 
 ## Repository Structure
@@ -284,11 +384,12 @@ Use this checklist at the beginning of the next session:
    - latest `config/sanitized/isp-*.sanitized.rsc`
    - latest `config/sanitized/backend-*.sanitized.rsc`
 3. Confirm current state:
-   - ISP direct publish to `172.26.32.250` (`443`, `4000`)
-   - backend `srcnat` disabled
+   - ISP direct publish to `172.26.20.254` (`443`, `4000` → to-ports `443`)
+   - backend `srcnat masquerade` on `UPLINK-A` still **enabled** (pending removal)
    - backend legacy `dstnat` disabled
    - ISP static routes to `172.26.10/20/30/32` via `172.26.40.2`
-4. Continue from `Pending` checklist under **Current Migration Status**.
+   - backend LAG `LAG-SWITCH-V2` trunk tagged 10/20/30
+ 4. Continue from `Pending` checklist under **Current Migration Status**.
 
 Starter prompt for next time:
 
