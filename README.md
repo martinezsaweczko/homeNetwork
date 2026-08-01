@@ -399,10 +399,174 @@ Read README.md and latest config/sanitized/*.sanitized.rsc first.
 Then continue from the Pending checklist.
 ```
 
-## Diagram Format
+## Live Topology Snapshot (Latest Router Exports)
 
-This project standard is **Mermaid** diagrams in Markdown.
+Source: `config/sanitized/*-20260720-211212.sanitized.rsc`
 
-- Keep the network topology diagram directly in `README.md` using Mermaid code blocks.
-- Update the Mermaid diagram whenever topology, VLANs, or routing changes.
-- Prefer Mermaid over image-based diagrams to keep reviews and diffs simple.
+```mermaid
+flowchart TB
+    subgraph WAN["WAN edge"]
+        I[Internet]
+        ONT[ONT / ISP fiber]
+        I --- ONT
+    end
+
+    subgraph RoomA["Room A — ISP Router RB4011 (Internet Router)"]
+        DIGI["PPPoE Digi\nvia VLAN_DIGI id 20 on WAN ether1\nadd-default-route + peer DNS"]
+        A["ISP Router\nidentity: Internet Router"]
+        ETHB["ETH-BRIDGE\n172.26.0.1/24\nDHCP + DNS"]
+        A4["ether4\n172.26.40.1/30\nLink to Router B"]
+        ONT --> DIGI --> A
+        A --- ETHB
+        A --- A4
+        LAN0["Room A LAN clients\n172.26.0.0/24\neth2,3,5–10 on bridge"]
+        ETHB --- LAN0
+        PI["pi.martinez-saweczko.es\n172.26.0.25"]
+        ETHB --- PI
+    end
+
+    subgraph Transit["Transit link /30"]
+        T["172.26.40.0/30\nA: 172.26.40.1 ↔ B: 172.26.40.2"]
+    end
+
+    subgraph RoomB["Room B — Backend Router RB4011 (MikroRouter)"]
+        B["Backend Router\nidentity: MikroRouter"]
+        UA["UPLINK-A ether1\n172.26.40.2/30\ndefault GW 172.26.40.1"]
+        BL["BRIDGE-LAN\nvlan-filtering=yes\n172.26.32.1/24 legacy"]
+        V10["VLAN10-MGMT\n172.26.10.1/24\nDHCP 10.100–10.254"]
+        V20["VLAN20-GW SERVERS\n172.26.20.1/24\nDHCP 20.100–20.254"]
+        V30["VLAN30-USERS\n172.26.30.1/24\nDHCP 30.100–30.254"]
+        LAG["LAG-SWITCH-V2\nbalance-xor\nslaves ether7–10\ntagged trunk 10,20,30"]
+        E2["ether2/3 access\nPVID 10 untagged"]
+        E5["ether5 access\nPVID 20 untagged"]
+        B --- UA
+        B --- BL
+        BL --- V10
+        BL --- V20
+        BL --- V30
+        BL --- LAG
+        BL --- E2
+        BL --- E5
+    end
+
+    subgraph Switch["Managed switch"]
+        SW["Switch L2\nMGMT 172.26.10.250"]
+        SW10["VLAN 10 access ports"]
+        SW20["VLAN 20 access ports"]
+        SW30["VLAN 30 access ports"]
+        SW --- SW10
+        SW --- SW20
+        SW --- SW30
+    end
+
+    subgraph Hosts["Key hosts"]
+        WEB["Webserver / services\n172.26.20.254\nDNS: server, registry,\nperiodico, impresora"]
+        FED["Fedora Server\n172.26.20.250"]
+        LEG["Legacy / PXE path\n172.26.32.250 next-server\nleases e.g. .130 .240"]
+    end
+
+    A4 --> T --> UA
+    LAG --> SW
+    SW20 --> WEB
+    SW20 --> FED
+    BL -.-> LEG
+
+    DIGI -->|"dst-nat WAN TCP 443,4000\n→ 172.26.20.254:443"| WEB
+    A -->|"static routes via 172.26.40.2"| V10
+    A -->|"static routes via 172.26.40.2"| V20
+    A -->|"static routes via 172.26.40.2"| V30
+    A -->|"static route via 172.26.40.2"| BL
+
+    classDef edge fill:#1f2937,color:#fff,stroke:#60a5fa,stroke-width:2px;
+    classDef router fill:#0b3d2e,color:#fff,stroke:#34d399,stroke-width:2px;
+    classDef net fill:#172554,color:#fff,stroke:#60a5fa,stroke-width:1.5px;
+    classDef host fill:#3f1d2e,color:#fff,stroke:#f472b6,stroke-width:1.5px;
+    classDef switch fill:#3a2e0b,color:#fff,stroke:#fbbf24,stroke-width:1.5px;
+    classDef lag fill:#422006,color:#fff,stroke:#fb923c,stroke-width:1.5px;
+
+    class I,ONT,DIGI edge;
+    class A,B,ETHB,A4,UA,BL router;
+    class V10,V20,V30,LAN0,T net;
+    class WEB,FED,LEG,PI host;
+    class SW,SW10,SW20,SW30 switch;
+    class LAG,E2,E5 lag;
+```
+
+### Addressing & L3 summary
+
+| Segment | CIDR | Gateway / device | Notes |
+|--------|------|------------------|--------|
+| Room A LAN | `172.26.0.0/24` | ISP `172.26.0.1` on `ETH-BRIDGE` | DHCP + DNS on ISP |
+| Transit A↔B | `172.26.40.0/30` | A `ether4` / B `UPLINK-A` | Point-to-point |
+| Legacy LAN | `172.26.32.0/24` | Backend `172.26.32.1` on `BRIDGE-LAN` | DHCP + PXE next-server `172.26.32.250` |
+| VLAN10 MGMT | `172.26.10.0/24` | Backend `172.26.10.1` on `VLAN10-MGMT` | Switch MGMT at `.250` |
+| VLAN20 SERVERS | `172.26.20.0/24` | Backend `172.26.20.1` on `VLAN20-GW` | Webserver `.254`, Fedora `.250` |
+| VLAN30 USERS | `172.26.30.0/24` | Backend `172.26.30.1` on `VLAN30-USERS` | — |
+
+### Key operational notes (from latest exports)
+
+- **NAT boundary**: ISP does single `srcnat masquerade` on `Digi` (PPPoE). Backend still has `srcnat masquerade out-interface=UPLINK-A` enabled → **double NAT today** (tracked in Pending).
+- **WAN publish**: ISP `dst-nat` on `Digi` forwards `TCP 443,4000` → `172.26.20.254:443` (VLAN20 webserver). Legacy `dst-nat` to `172.26.40.2` and `172.26.32.250` are **disabled**.
+- **Backend LAG**: `LAG-SWITCH-V2` (`balance-xor`, `layer-2-and-3` hash) on `ether7–10`; trunk carries VLANs 10,20,30 tagged.
+- **Bridge VLAN filtering**: `BRIDGE-LAN` has `vlan-filtering=yes`; tagged members include `BRIDGE-LAN` (CPU) and `LAG-SWITCH-V2`; access ports `ether2/3` PVID 10, `ether5` PVID 20.
+- **ISP static routes**: Four routes to `172.26.10/20/30/32.0/24` via `172.26.40.2`.
+- **Backend firewall**: Accept rules for ISP (`172.26.0.0/16`) → VLAN20/VLAN30 via `UPLINK-A`; inter-VLAN allows between legacy/VLAN10/VLAN20; default-drop rules are **disabled** (tracked in Pending).
+- **DHCP pools**: ISP pool still spans old `/19` range (`172.26.0.2–172.26.31.254`); backend VLAN pools scoped to `/24` each.
+
+## Network Topology (D2)
+
+A professional, container-based topology snapshot built with [D2](https://d2lang.com).
+Source and rendering instructions live in [`docs/topology/`](docs/topology/README.md).
+
+![Network Topology](docs/topology/topology.svg)
+
+### Legend
+
+| Color (stroke) | Element type |
+|----------------|--------------|
+| Blue (`#60a5fa`) | WAN edge, Room A LAN, Transit /30 |
+| Green (`#34d399`) | Routers (ISP, Backend) |
+| Amber (`#fbbf24`) | Managed switch |
+| Violet (`#a78bfa`) | VLAN20 SERVERS |
+| Green (`#34d399`) | VLAN10 MGMT |
+| Lime (`#a3e635`) | VLAN30 USERS |
+| Red (`#f87171`) | Legacy LAN (deprecated) |
+| Pink (`#f472b6`) | Physical hosts / WAN publish target |
+| Orange (`#fb923c`, thick) | LAG-SWITCH-V2 trunk |
+
+Edge styles:
+- **Solid arrows** = physical / L2-L3 links.
+- **Dashed violet** = dual-homed host (same physical machine: VLAN20 service NIC + VLAN10 KVM-mgmt NIC).
+- **Dashed pink** = WAN dst-nat publish (`443,4000` → `172.26.20.249:443`).
+- **Dashed green** = ISP static routes to rack networks via `172.26.40.2`.
+
+### Notes
+
+- **Dual-homed hosts**: `server` / `k8s1` / `k8s2` / `k8s3` each have a VLAN20
+  (services) and a VLAN10 (KVM management) interface on the same physical machine.
+- **WAN publish**: ISP `dst-nat` forwards WAN TCP `443,4000` → `172.26.20.249:443`
+  (the `server` host on VLAN20). Legacy `dst-nat` to `172.26.32.250` is disabled.
+- **LAG**: `LAG-SWITCH-V2` (`balance-xor`, `layer-2-and-3` hash) on `ether7-10`
+  connects backend router to switch, carrying VLANs 10/20/30 tagged.
+- **Static routes**: ISP holds four routes to `172.26.10/20/30/32.0/24` via `172.26.40.2`.
+- **Legacy LAN** (`172.26.32.0/24`): still active on `BRIDGE-LAN`; migration to
+  VLANs is tracked in the Pending checklist.
+
+To regenerate the SVG after editing: see [`docs/topology/README.md`](docs/topology/README.md).
+
+## Diagram Formats
+
+This project uses two diagram formats:
+
+### Mermaid (in-document snapshots)
+
+- Used for inline live-topology snapshots elsewhere in this `README.md`.
+- Renders natively on GitHub; text-based for clean diffs.
+- Update whenever topology, VLANs, or routing changes.
+
+### D2 (professional topology)
+
+- Used for the dedicated network topology above (`docs/topology/`).
+- Container-based layout, color-coded VLANs, richer styling.
+- Requires committing the rendered SVG alongside the `.d2` source.
+- See [`docs/topology/README.md`](docs/topology/README.md) for install/render steps.
