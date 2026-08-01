@@ -1,0 +1,159 @@
+internet: Internet {
+  shape: cloud
+  style.fill: transparent
+  style.stroke: "#60a5fa"
+  style.stroke-width: 2
+  style.font-color: "#e5e7eb"
+}
+
+ont: ONT / ISP fiber {
+  style.fill: "#1f2937"
+  style.stroke: "#60a5fa"
+  style.font-color: white
+}
+
+isp_router: ISP Router\nRB4011 "Internet Router" {
+  style.fill: "#0b3d2e"
+  style.stroke: "#34d399"
+  style.font-color: white
+  style.stroke-width: 2
+}
+
+backend_router: Backend Router\nRB4011 "MikroRouter" {
+  style.fill: "#0b3d2e"
+  style.stroke: "#34d399"
+  style.font-color: white
+  style.stroke-width: 2
+}
+
+switch: Managed Switch L2\nMGMT 172.26.10.250 {
+  style.fill: "#3a2e0b"
+  style.stroke: "#fbbf24"
+  style.font-color: white
+}
+
+Room A LAN: {
+  style.fill: "#172554"
+  style.font-color: white
+  style.stroke: "#60a5fa"
+  label: "Room A LAN 172.26.0.0/24"
+  isp_addr: 172.26.0.1 (ETH-BRIDGE) {
+    style.fill: "#0b3d2e"
+    style.font-color: white
+  }
+  pi: pi.martinez-saweczko.es\n172.26.0.25 (Raspberry Pi) {
+    style.fill: "#3f1d2e"
+    style.stroke: "#f472b6"
+    style.font-color: white
+  }
+}
+
+Transit: {
+  style.fill: "#172554"
+  style.font-color: white
+  style.stroke: "#60a5fa"
+  label: "Transit /30 172.26.40.0/30"
+  t_a: ether4 172.26.40.1 {
+    style.fill: "#0b3d2e"
+    style.font-color: white
+  }
+  t_b: UPLINK-A 172.26.40.2 {
+    style.fill: "#0b3d2e"
+    style.font-color: white
+  }
+}
+
+VLAN20 SERVERS: {
+  style.fill: "#2d1b4e"
+  style.font-color: white
+  style.stroke: "#a78bfa"
+  label: "VLAN20 SERVERS 172.26.20.0/24"
+  server: server\n172.26.20.249\nserver.martinez-saweczko.es {
+    style.fill: "#3f1d2e"
+    style.stroke: "#f472b6"
+    style.font-color: white
+  }
+  k8s1: k8s1\n172.26.20.248
+  k8s2: k8s2\n172.26.20.247
+  k8s3: k8s3\n172.26.20.246
+}
+
+VLAN10 MGMT: {
+  style.fill: "#1a2e1a"
+  style.font-color: white
+  style.stroke: "#34d399"
+  label: "VLAN10 MGMT 172.26.10.0/24"
+  server_kvm: serverkvm\n172.26.10.249
+  k8s1_kvm: k8s1kvm\n172.26.10.248
+  k8s2_kvm: k8s2kvm\n172.26.10.247
+  k8s3_kvm: k8s3kvm\n172.26.10.246
+}
+
+VLAN30 USERS: {
+  style.fill: "#2d4a1a"
+  style.font-color: white
+  style.stroke: "#a3e635"
+  label: "VLAN30 USERS 172.26.30.0/24"
+  users: DHCP .100-.254
+}
+
+Legacy LAN: {
+  style.fill: "#4a1a1a"
+  style.font-color: white
+  style.stroke: "#f87171"
+  label: "Legacy LAN 172.26.32.0/24"
+  legacy_gw: 172.26.32.1 (BRIDGE-LAN)
+}
+
+internet -> ont: PPPoE Digi
+ont -> isp_router: VLAN20 on ether1
+
+isp_router -> Room A LAN.isp_addr: ETH-BRIDGE
+isp_router -> Transit.t_a: ether4
+
+Transit.t_b -> backend_router: UPLINK-A
+Transit.t_a -> Transit.t_b: 172.26.40.0/30 {
+  style.stroke-width: 2
+  style.stroke: "#60a5fa"
+}
+
+backend_router -> switch: LAG-SWITCH-V2\nbalance-xor ether7-10\ntagged 10,20,30 {
+  style.stroke: "#fb923c"
+  style.stroke-width: 3
+}
+switch -> VLAN20 SERVERS.server
+switch -> VLAN20 SERVERS.k8s1
+switch -> VLAN20 SERVERS.k8s2
+switch -> VLAN20 SERVERS.k8s3
+switch -> VLAN30 USERS.users: tagged VLAN30
+
+backend_router -> Legacy LAN.legacy_gw: BRIDGE-LAN legacy
+
+VLAN20 SERVERS.server -> VLAN10 MGMT.server_kvm: same host (KVM) {
+  style.stroke-dash: 4
+  style.stroke: "#a78bfa"
+}
+VLAN20 SERVERS.k8s1 -> VLAN10 MGMT.k8s1_kvm: same host (KVM) {
+  style.stroke-dash: 4
+  style.stroke: "#a78bfa"
+}
+VLAN20 SERVERS.k8s2 -> VLAN10 MGMT.k8s2_kvm: same host (KVM) {
+  style.stroke-dash: 4
+  style.stroke: "#a78bfa"
+}
+VLAN20 SERVERS.k8s3 -> VLAN10 MGMT.k8s3_kvm: same host (KVM) {
+  style.stroke-dash: 4
+  style.stroke: "#a78bfa"
+}
+
+internet -> VLAN20 SERVERS.server: dst-nat WAN 443,4000\n-> 172.26.20.249:443 {
+  style.stroke-dash: 4
+  style.stroke: "#f472b6"
+  style.stroke-width: 2
+}
+
+isp_router -> backend_router: static routes\n10/20/30/32 via 172.26.40.2 {
+  style.stroke-dash: 4
+  style.stroke: "#34d399"
+  style.stroke-width: 2
+}
