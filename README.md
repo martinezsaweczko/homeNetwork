@@ -30,6 +30,7 @@ Completed:
 - [x] Added firewall rules on backend router to allow ISP network traffic to VLANs.
 - [x] Backend LAG to managed switch (`LAG-SWITCH-V2`, `balance-xor`, ether7–10).
 - [x] Bridge VLAN filtering on backend (`BRIDGE-LAN`) with tagged trunk on LAG.
+- [x] Configured MetalLB BGP backend on router: instance AS 64512, 3 eBGP peers to K8s nodes, input filter for `172.26.20.32/27`, firewall rule for TCP 179.
 
 Pending:
 - [ ] Disable backend `srcnat masquerade` on `UPLINK-A` (still active → double NAT today).
@@ -40,7 +41,7 @@ Pending:
 
 ## Live Topology Snapshot (Latest Router Exports)
 
-Source: `config/sanitized/*-20260805-201009.sanitized.rsc`
+Source: `config/sanitized/*-20260805-210543.sanitized.rsc`
 
 ```mermaid
 flowchart TB
@@ -332,6 +333,63 @@ Import the `.conf` file into the WireGuard app on your laptop/phone, then toggle
 
 ---
 
+## MetalLB BGP Backend
+
+The K8s cluster (nodes `172.26.20.248`, `.247`, `.246`) advertises its LoadBalancer service pool to the backend router via **BGP**. This replaces Layer-2 ARP-based MetalLB with a routed approach that works across the VLAN20 gateway.
+
+### Design
+
+| Parameter | Value |
+|-----------|-------|
+| Local AS (router) | 64512 |
+| Remote AS (K8s / MetalLB) | 64513 |
+| Router listen IP | 172.26.20.1 |
+| MetalLB pool | 172.26.20.32/27 |
+| Peers | k8s1 (172.26.20.248), k8s2 (172.26.20.247), k8s3 (172.26.20.246) |
+
+### Router-side config (Backend)
+
+```rsc
+# BGP instance & template
+/routing bgp instance add name=metallb as=64512
+/routing bgp template add name=metallb as=64512 output.network=metallb-out
+
+# Output filter: prevent router from advertising its own routes to K8s
+/routing filter rule add chain=metallb-out rule="reject"
+
+# Peers
+/routing bgp connection add name=peer-k8s1 template=metallb instance=metallb remote.address=172.26.20.248 remote.as=64513 local.address=172.26.20.1 local.role=ebgp
+/routing bgp connection add name=peer-k8s2 template=metallb instance=metallb remote.address=172.26.20.247 remote.as=64513 local.address=172.26.20.1 local.role=ebgp
+/routing bgp connection add name=peer-k8s3 template=metallb instance=metallb remote.address=172.26.20.246 remote.as=64513 local.address=172.26.20.1 local.role=ebgp
+
+# Input filter: only accept MetalLB pool
+/routing filter rule add chain=metallb-in rule="if ( dst in 172.26.20.32/27 ) { accept } else { reject }"
+
+# Apply filter
+/routing bgp connection set peer-k8s1 input.filter=metallb-in
+/routing bgp connection set peer-k8s2 input.filter=metallb-in
+/routing bgp connection set peer-k8s3 input.filter=metallb-in
+
+# Firewall
+/ip firewall filter add chain=input protocol=tcp dst-port=179 src-address=172.26.20.0/24 action=accept place-before=6 comment="Allow BGP from k8s nodes"
+```
+
+### Notes & caveats
+
+- **Router-ID**: ROS 7.23.2 does not accept `router-id` on the BGP template in this build. The dynamic routing-id (`172.26.50.1` from `wg0`) is used as the BGP router-id. This is functionally fine for eBGP peering inside the lab.
+- **ECMP**: Equal-cost multipath is enabled by default in ROS 7. Once K8s speakers are online and advertise the same prefix, verify with `/ip route print detail where dst-address in 172.26.20.32/27`.
+- **ISP dst-nat**: WAN `443`/`4000` still points to `172.26.20.254` (webserver). Repointing to a MetalLB service IP is tracked as a future step.
+
+### Verification commands
+
+```rsc
+/routing bgp connection print detail
+/routing bgp session print
+/ip route print detail where dst-address in 172.26.20.32/27
+```
+
+---
+
 ## Automated Router Backup & Sanitization
 
 The script connects to:
@@ -487,7 +545,8 @@ Use this checklist at the beginning of the next session:
    - ISP static routes to `172.26.10/20/30/32/50` via `172.26.40.2`
    - backend LAG `LAG-SWITCH-V2` trunk tagged 10/20/30
    - WireGuard `wg0` running on backend, peers `laptop` + `spare`, UDP `51820` forwarded from ISP
- 4. Continue from `Pending` checklist under **Current Migration Status**.
+   - MetalLB BGP peers configured on backend (local AS 64512, peers to `172.26.20.248`, `.247`, `.246`); waiting for K8s side to come online
+  4. Continue from `Pending` checklist under **Current Migration Status**.
 
 Starter prompt for next time:
 
@@ -499,7 +558,7 @@ Then continue from the Pending checklist.
 
 ## Live Topology Snapshot (Latest Router Exports)
 
-Source: `config/sanitized/*-20260720-211212.sanitized.rsc`
+Source: `config/sanitized/*-20260805-210543.sanitized.rsc`
 
 ```mermaid
 flowchart TB
