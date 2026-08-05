@@ -40,7 +40,7 @@ Pending:
 
 ## Live Topology Snapshot (Latest Router Exports)
 
-Source: `config/sanitized/*-20260720-211212.sanitized.rsc`
+Source: `config/sanitized/*-20260805-201009.sanitized.rsc`
 
 ```mermaid
 flowchart TB
@@ -98,6 +98,10 @@ flowchart TB
         SW --- SW30
     end
 
+    subgraph VPN["WireGuard VPN"]
+        WG["VPN Client\n172.26.50.2/32\nsplit tunnel 172.26.0.0/16"]
+    end
+
     subgraph Hosts["Key hosts"]
         WEB["Webserver / services\n172.26.20.254\nDNS: server, registry,\nperiodico, impresora"]
         FED["Fedora Server\n172.26.20.250"]
@@ -110,6 +114,8 @@ flowchart TB
     SW20 --> FED
     BL -.-> LEG
 
+    I -->|"WireGuard UDP 51820\ndst-nat → 172.26.40.2"| WG
+    WG -.->|"VPN tunnel\nwg0 172.26.50.1/24"| B
     DIGI -->|"dst-nat WAN TCP 443,4000\n→ 172.26.20.254:443"| WEB
     A -->|"static routes via 172.26.40.2"| V10
     A -->|"static routes via 172.26.40.2"| V20
@@ -129,6 +135,7 @@ flowchart TB
     class WEB,FED,LEG,PI host;
     class SW,SW10,SW20,SW30 switch;
     class LAG,E2,E5 lag;
+    class WG net;
 ```
 
 ### Addressing & L3 summary
@@ -141,16 +148,18 @@ flowchart TB
 | VLAN20 SERVERS | `172.26.20.0/24` | Backend `172.26.20.1` | WAN publish target `.254` |
 | VLAN30 USERS | `172.26.30.0/24` | Backend `172.26.30.1` | |
 | Legacy LAN | `172.26.32.0/24` | Backend `172.26.32.1` on `BRIDGE-LAN` | Still active |
+| WireGuard VPN | `172.26.50.0/24` | Backend `wg0` `172.26.50.1` | Split tunnel, UDP `51820` |
 
 ### Routing & NAT (as of export)
 
 | Item | State |
 |------|--------|
 | ISP default route | PPPoE `Digi` (`add-default-route=yes`) |
-| ISP → rack nets | Static via `172.26.40.2` for `10/20/30/32` |
+| ISP → rack nets | Static via `172.26.40.2` for `10/20/30/32/50` |
+| ISP WAN dst-nat WireGuard | UDP `51820` → `172.26.40.2:51820` **active** |
 | Backend default route | `0.0.0.0/0` → `172.26.40.1` |
 | ISP edge NAT | `srcnat masquerade` out `Digi` **active** |
-| ISP WAN dst-nat | `443,4000` → `172.26.20.254:443` **active** |
+| ISP WAN dst-nat web | `443,4000` → `172.26.20.254:443` **active** |
 | ISP legacy dst-nat to `172.26.40.2` / `172.26.32.250` | **disabled** |
 | Backend `srcnat masquerade` out `UPLINK-A` | **still active** (double NAT) |
 | Backend legacy `dstnat` from uplink | **disabled** |
@@ -232,6 +241,94 @@ flowchart TD
 - ✅ `ping 172.26.20.254` from ISP client succeeds
 - ✅ `ssh admin@172.26.20.254` from ISP client succeeds
 - ✅ Backend router can ping VLAN20 devices directly
+
+### 2026-08-05 20:10:09 UTC
+**File:** `isp-20260805-201009.sanitized.rsc` / `backend-20260805-201009.sanitized.rsc`
+
+**Changes Applied:**
+1. **WireGuard VPN added on backend router**
+   - Interface `wg0` with listen-port `51820` and VPN subnet `172.26.50.1/24`
+   - Peers: `laptop` (`172.26.50.2/32`), `spare` (`172.26.50.3/32`)
+   - Firewall rules added to allow WireGuard UDP and VPN traffic to internal networks
+   - **Reason:** Enable secure remote access from outside the home network
+   - **Impact:** VPN clients can reach ISP router, backend router, VLANs, and k8s nodes
+
+2. **ISP router WireGuard port-forward and route**
+   - dst-nat: WAN UDP `51820` → `172.26.40.2:51820`
+   - Forward firewall rule to allow the NATed traffic
+   - Static route: `172.26.50.0/24` via `172.26.40.2`
+   - **Reason:** Route VPN return traffic back through the backend router
+
+**Testing Verified:**
+- ✅ WireGuard interface `wg0` running on backend router
+- ✅ Firewall rules active on both routers (input + forward)
+- ✅ ISP static route for VPN subnet present
+
+---
+
+## WireGuard VPN
+
+A WireGuard VPN is configured on the **backend router** to allow secure remote access from laptops or mobile devices outside the home network.
+
+### VPN Design
+
+| Parameter | Value |
+|-----------|-------|
+| VPN subnet | `172.26.50.0/24` |
+| Backend wg0 | `172.26.50.1/24`, port `51820` |
+| Peer 1 (laptop) | `172.26.50.2/32` |
+| Peer 2 (spare) | `172.26.50.3/32` |
+| Endpoint | `martinezsaweczko.ddnsfree.com:51820` |
+| Tunnel mode | **Split tunnel** (`AllowedIPs = 172.26.0.0/16`) |
+| DNS over VPN | `172.26.0.1` (resolves internal names) |
+
+### What You Can Reach via VPN
+
+Once connected, the VPN client has access to:
+- **ISP router:** `172.26.0.1` (SSH, Webfig, Winbox)
+- **Backend router:** `172.26.32.1`, `172.26.10.1`, `172.26.20.1`, `172.26.30.1`
+- **K8s nodes:** `172.26.20.248`–`172.26.20.246` and `172.26.10.248`–`172.26.10.246`
+- **Webserver / services:** `172.26.20.249`, `172.26.20.250`
+- **Any other internal host** by IP or DNS name (e.g., `k8s1.martinez-saweczko.es`)
+
+### Router Configuration Summary
+
+**Backend Router:**
+- WireGuard interface `wg0` listens on UDP `51820`
+- Firewall `input`: allow UDP `51820`; allow `172.26.50.0/24` to router
+- Firewall `forward`: allow `172.26.50.0/24` ↔ `172.26.0.0/16`
+
+**ISP Router:**
+- `dst-nat`: WAN UDP `51820` → `172.26.40.2:51820`
+- Firewall `forward`: allow NATed WireGuard traffic to backend
+- Static route: `172.26.50.0/24` via `172.26.40.2`
+
+### Client Setup
+
+Client config files are stored in `wireguard/clients/` (ignored by git, contains private keys).
+
+Example `laptop.conf`:
+
+```ini
+[Interface]
+Address = 172.26.50.2/24
+DNS = 172.26.0.1
+
+[Peer]
+PublicKey = <backend-router-public-key>
+AllowedIPs = 172.26.0.0/16
+Endpoint = martinezsaweczko.ddnsfree.com:51820
+PersistentKeepalive = 25
+```
+
+Import the `.conf` file into the WireGuard app on your laptop/phone, then toggle the tunnel on.
+
+### Security Notes
+
+- Private keys are **never committed** to git (stored in `wireguard/`, added to `.gitignore`).
+- Peer public keys are non-sensitive and appear in sanitized exports.
+- If a private key is ever exposed, remove the peer from the router and regenerate a new keypair.
+- The VPN uses a **split tunnel**: only `172.26.0.0/16` traffic flows through the VPN; all other internet traffic stays direct.
 
 ---
 
@@ -387,8 +484,9 @@ Use this checklist at the beginning of the next session:
    - ISP direct publish to `172.26.20.254` (`443`, `4000` → to-ports `443`)
    - backend `srcnat masquerade` on `UPLINK-A` still **enabled** (pending removal)
    - backend legacy `dstnat` disabled
-   - ISP static routes to `172.26.10/20/30/32` via `172.26.40.2`
+   - ISP static routes to `172.26.10/20/30/32/50` via `172.26.40.2`
    - backend LAG `LAG-SWITCH-V2` trunk tagged 10/20/30
+   - WireGuard `wg0` running on backend, peers `laptop` + `spare`, UDP `51820` forwarded from ISP
  4. Continue from `Pending` checklist under **Current Migration Status**.
 
 Starter prompt for next time:
