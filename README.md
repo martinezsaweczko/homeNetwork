@@ -37,11 +37,12 @@ Pending:
 - [ ] Access port assignment / validation per VLAN on managed switch.
 - [ ] Inter-VLAN firewall policy (default deny + explicit allow rules).
 - [ ] Gradual server/client migration from legacy subnet (`172.26.32.0/24`) to VLANs.
-- [ ] Align ISP DHCP pool ranges with `/24` network (pool still spans old `/19` range).
+- [x] Align ISP DHCP pool ranges with `/24` network (fixed 2026-08-29; pool now `172.26.0.2-172.26.0.254`).
+- [x] Relocate Epson printer from legacy `172.26.32.130` to ISP LAN `172.26.0.130` (DHCP reservation moved 2026-08-29; restart printer to take effect).
 
 ## Live Topology Snapshot (Latest Router Exports)
 
-Source: `config/sanitized/*-20260805-210543.sanitized.rsc`
+Source: `config/sanitized/*-20260829-101733.sanitized.rsc`
 
 ```mermaid
 flowchart TB
@@ -558,7 +559,7 @@ Then continue from the Pending checklist.
 
 ## Live Topology Snapshot (Latest Router Exports)
 
-Source: `config/sanitized/*-20260805-210543.sanitized.rsc`
+Source: `config/sanitized/*-20260829-101733.sanitized.rsc`
 
 ```mermaid
 flowchart TB
