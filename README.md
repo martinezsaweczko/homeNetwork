@@ -30,17 +30,19 @@ Completed:
 - [x] Added firewall rules on backend router to allow ISP network traffic to VLANs.
 - [x] Backend LAG to managed switch (`LAG-SWITCH-V2`, `balance-xor`, ether7–10).
 - [x] Bridge VLAN filtering on backend (`BRIDGE-LAN`) with tagged trunk on LAG.
+- [x] Configured MetalLB BGP backend on router: instance AS 64512, 3 eBGP peers to K8s nodes, input filter for `172.26.20.32/27`, firewall rule for TCP 179.
 
 Pending:
 - [ ] Disable backend `srcnat masquerade` on `UPLINK-A` (still active → double NAT today).
 - [ ] Access port assignment / validation per VLAN on managed switch.
 - [ ] Inter-VLAN firewall policy (default deny + explicit allow rules).
 - [ ] Gradual server/client migration from legacy subnet (`172.26.32.0/24`) to VLANs.
-- [ ] Align ISP DHCP pool ranges with `/24` network (pool still spans old `/19` range).
+- [x] Align ISP DHCP pool ranges with `/24` network (fixed 2026-08-29; pool now `172.26.0.2-172.26.0.254`).
+- [x] Relocate Epson printer from legacy `172.26.32.130` to ISP LAN `172.26.0.130` (DHCP reservation moved 2026-08-29; restart printer to take effect).
 
 ## Live Topology Snapshot (Latest Router Exports)
 
-Source: `config/sanitized/*-20260720-211212.sanitized.rsc`
+Source: `config/sanitized/*-20260829-101733.sanitized.rsc`
 
 ```mermaid
 flowchart TB
@@ -98,6 +100,10 @@ flowchart TB
         SW --- SW30
     end
 
+    subgraph VPN["WireGuard VPN"]
+        WG["VPN Client\n172.26.50.2/32\nsplit tunnel 172.26.0.0/16"]
+    end
+
     subgraph Hosts["Key hosts"]
         WEB["Webserver / services\n172.26.20.254\nDNS: server, registry,\nperiodico, impresora"]
         FED["Fedora Server\n172.26.20.250"]
@@ -110,6 +116,8 @@ flowchart TB
     SW20 --> FED
     BL -.-> LEG
 
+    I -->|"WireGuard UDP 51820\ndst-nat → 172.26.40.2"| WG
+    WG -.->|"VPN tunnel\nwg0 172.26.50.1/24"| B
     DIGI -->|"dst-nat WAN TCP 443,4000\n→ 172.26.20.254:443"| WEB
     A -->|"static routes via 172.26.40.2"| V10
     A -->|"static routes via 172.26.40.2"| V20
@@ -129,6 +137,7 @@ flowchart TB
     class WEB,FED,LEG,PI host;
     class SW,SW10,SW20,SW30 switch;
     class LAG,E2,E5 lag;
+    class WG net;
 ```
 
 ### Addressing & L3 summary
@@ -141,16 +150,18 @@ flowchart TB
 | VLAN20 SERVERS | `172.26.20.0/24` | Backend `172.26.20.1` | WAN publish target `.254` |
 | VLAN30 USERS | `172.26.30.0/24` | Backend `172.26.30.1` | |
 | Legacy LAN | `172.26.32.0/24` | Backend `172.26.32.1` on `BRIDGE-LAN` | Still active |
+| WireGuard VPN | `172.26.50.0/24` | Backend `wg0` `172.26.50.1` | Split tunnel, UDP `51820` |
 
 ### Routing & NAT (as of export)
 
 | Item | State |
 |------|--------|
 | ISP default route | PPPoE `Digi` (`add-default-route=yes`) |
-| ISP → rack nets | Static via `172.26.40.2` for `10/20/30/32` |
+| ISP → rack nets | Static via `172.26.40.2` for `10/20/30/32/50` |
+| ISP WAN dst-nat WireGuard | UDP `51820` → `172.26.40.2:51820` **active** |
 | Backend default route | `0.0.0.0/0` → `172.26.40.1` |
 | ISP edge NAT | `srcnat masquerade` out `Digi` **active** |
-| ISP WAN dst-nat | `443,4000` → `172.26.20.254:443` **active** |
+| ISP WAN dst-nat web | `443,4000` → `172.26.20.254:443` **active** |
 | ISP legacy dst-nat to `172.26.40.2` / `172.26.32.250` | **disabled** |
 | Backend `srcnat masquerade` out `UPLINK-A` | **still active** (double NAT) |
 | Backend legacy `dstnat` from uplink | **disabled** |
@@ -232,6 +243,151 @@ flowchart TD
 - ✅ `ping 172.26.20.254` from ISP client succeeds
 - ✅ `ssh admin@172.26.20.254` from ISP client succeeds
 - ✅ Backend router can ping VLAN20 devices directly
+
+### 2026-08-05 20:10:09 UTC
+**File:** `isp-20260805-201009.sanitized.rsc` / `backend-20260805-201009.sanitized.rsc`
+
+**Changes Applied:**
+1. **WireGuard VPN added on backend router**
+   - Interface `wg0` with listen-port `51820` and VPN subnet `172.26.50.1/24`
+   - Peers: `laptop` (`172.26.50.2/32`), `spare` (`172.26.50.3/32`)
+   - Firewall rules added to allow WireGuard UDP and VPN traffic to internal networks
+   - **Reason:** Enable secure remote access from outside the home network
+   - **Impact:** VPN clients can reach ISP router, backend router, VLANs, and k8s nodes
+
+2. **ISP router WireGuard port-forward and route**
+   - dst-nat: WAN UDP `51820` → `172.26.40.2:51820`
+   - Forward firewall rule to allow the NATed traffic
+   - Static route: `172.26.50.0/24` via `172.26.40.2`
+   - **Reason:** Route VPN return traffic back through the backend router
+
+**Testing Verified:**
+- ✅ WireGuard interface `wg0` running on backend router
+- ✅ Firewall rules active on both routers (input + forward)
+- ✅ ISP static route for VPN subnet present
+
+---
+
+## WireGuard VPN
+
+A WireGuard VPN is configured on the **backend router** to allow secure remote access from laptops or mobile devices outside the home network.
+
+### VPN Design
+
+| Parameter | Value |
+|-----------|-------|
+| VPN subnet | `172.26.50.0/24` |
+| Backend wg0 | `172.26.50.1/24`, port `51820` |
+| Peer 1 (laptop) | `172.26.50.2/32` |
+| Peer 2 (spare) | `172.26.50.3/32` |
+| Endpoint | `martinezsaweczko.ddnsfree.com:51820` |
+| Tunnel mode | **Split tunnel** (`AllowedIPs = 172.26.0.0/16`) |
+| DNS over VPN | `172.26.0.1` (resolves internal names) |
+
+### What You Can Reach via VPN
+
+Once connected, the VPN client has access to:
+- **ISP router:** `172.26.0.1` (SSH, Webfig, Winbox)
+- **Backend router:** `172.26.32.1`, `172.26.10.1`, `172.26.20.1`, `172.26.30.1`
+- **K8s nodes:** `172.26.20.248`–`172.26.20.246` and `172.26.10.248`–`172.26.10.246`
+- **Webserver / services:** `172.26.20.249`, `172.26.20.250`
+- **Any other internal host** by IP or DNS name (e.g., `k8s1.martinez-saweczko.es`)
+
+### Router Configuration Summary
+
+**Backend Router:**
+- WireGuard interface `wg0` listens on UDP `51820`
+- Firewall `input`: allow UDP `51820`; allow `172.26.50.0/24` to router
+- Firewall `forward`: allow `172.26.50.0/24` ↔ `172.26.0.0/16`
+
+**ISP Router:**
+- `dst-nat`: WAN UDP `51820` → `172.26.40.2:51820`
+- Firewall `forward`: allow NATed WireGuard traffic to backend
+- Static route: `172.26.50.0/24` via `172.26.40.2`
+
+### Client Setup
+
+Client config files are stored in `wireguard/clients/` (ignored by git, contains private keys).
+
+Example `laptop.conf`:
+
+```ini
+[Interface]
+Address = 172.26.50.2/24
+DNS = 172.26.0.1
+
+[Peer]
+PublicKey = <backend-router-public-key>
+AllowedIPs = 172.26.0.0/16
+Endpoint = martinezsaweczko.ddnsfree.com:51820
+PersistentKeepalive = 25
+```
+
+Import the `.conf` file into the WireGuard app on your laptop/phone, then toggle the tunnel on.
+
+### Security Notes
+
+- Private keys are **never committed** to git (stored in `wireguard/`, added to `.gitignore`).
+- Peer public keys are non-sensitive and appear in sanitized exports.
+- If a private key is ever exposed, remove the peer from the router and regenerate a new keypair.
+- The VPN uses a **split tunnel**: only `172.26.0.0/16` traffic flows through the VPN; all other internet traffic stays direct.
+
+---
+
+## MetalLB BGP Backend
+
+The K8s cluster (nodes `172.26.20.248`, `.247`, `.246`) advertises its LoadBalancer service pool to the backend router via **BGP**. This replaces Layer-2 ARP-based MetalLB with a routed approach that works across the VLAN20 gateway.
+
+### Design
+
+| Parameter | Value |
+|-----------|-------|
+| Local AS (router) | 64512 |
+| Remote AS (K8s / MetalLB) | 64513 |
+| Router listen IP | 172.26.20.1 |
+| MetalLB pool | 172.26.20.32/27 |
+| Peers | k8s1 (172.26.20.248), k8s2 (172.26.20.247), k8s3 (172.26.20.246) |
+
+### Router-side config (Backend)
+
+```rsc
+# BGP instance & template
+/routing bgp instance add name=metallb as=64512
+/routing bgp template add name=metallb as=64512 output.network=metallb-out
+
+# Output filter: prevent router from advertising its own routes to K8s
+/routing filter rule add chain=metallb-out rule="reject"
+
+# Peers
+/routing bgp connection add name=peer-k8s1 template=metallb instance=metallb remote.address=172.26.20.248 remote.as=64513 local.address=172.26.20.1 local.role=ebgp
+/routing bgp connection add name=peer-k8s2 template=metallb instance=metallb remote.address=172.26.20.247 remote.as=64513 local.address=172.26.20.1 local.role=ebgp
+/routing bgp connection add name=peer-k8s3 template=metallb instance=metallb remote.address=172.26.20.246 remote.as=64513 local.address=172.26.20.1 local.role=ebgp
+
+# Input filter: only accept MetalLB pool
+/routing filter rule add chain=metallb-in rule="if ( dst in 172.26.20.32/27 ) { accept } else { reject }"
+
+# Apply filter
+/routing bgp connection set peer-k8s1 input.filter=metallb-in
+/routing bgp connection set peer-k8s2 input.filter=metallb-in
+/routing bgp connection set peer-k8s3 input.filter=metallb-in
+
+# Firewall
+/ip firewall filter add chain=input protocol=tcp dst-port=179 src-address=172.26.20.0/24 action=accept place-before=6 comment="Allow BGP from k8s nodes"
+```
+
+### Notes & caveats
+
+- **Router-ID**: ROS 7.23.2 does not accept `router-id` on the BGP template in this build. The dynamic routing-id (`172.26.50.1` from `wg0`) is used as the BGP router-id. This is functionally fine for eBGP peering inside the lab.
+- **ECMP**: Equal-cost multipath is enabled by default in ROS 7. Once K8s speakers are online and advertise the same prefix, verify with `/ip route print detail where dst-address in 172.26.20.32/27`.
+- **ISP dst-nat**: WAN `443`/`4000` still points to `172.26.20.254` (webserver). Repointing to a MetalLB service IP is tracked as a future step.
+
+### Verification commands
+
+```rsc
+/routing bgp connection print detail
+/routing bgp session print
+/ip route print detail where dst-address in 172.26.20.32/27
+```
 
 ---
 
@@ -387,9 +543,11 @@ Use this checklist at the beginning of the next session:
    - ISP direct publish to `172.26.20.254` (`443`, `4000` → to-ports `443`)
    - backend `srcnat masquerade` on `UPLINK-A` still **enabled** (pending removal)
    - backend legacy `dstnat` disabled
-   - ISP static routes to `172.26.10/20/30/32` via `172.26.40.2`
+   - ISP static routes to `172.26.10/20/30/32/50` via `172.26.40.2`
    - backend LAG `LAG-SWITCH-V2` trunk tagged 10/20/30
- 4. Continue from `Pending` checklist under **Current Migration Status**.
+   - WireGuard `wg0` running on backend, peers `laptop` + `spare`, UDP `51820` forwarded from ISP
+   - MetalLB BGP peers configured on backend (local AS 64512, peers to `172.26.20.248`, `.247`, `.246`); waiting for K8s side to come online
+  4. Continue from `Pending` checklist under **Current Migration Status**.
 
 Starter prompt for next time:
 
@@ -401,7 +559,7 @@ Then continue from the Pending checklist.
 
 ## Live Topology Snapshot (Latest Router Exports)
 
-Source: `config/sanitized/*-20260720-211212.sanitized.rsc`
+Source: `config/sanitized/*-20260829-101733.sanitized.rsc`
 
 ```mermaid
 flowchart TB
