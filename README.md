@@ -37,12 +37,12 @@ Pending:
 - [ ] Access port assignment / validation per VLAN on managed switch.
 - [ ] Inter-VLAN firewall policy (default deny + explicit allow rules).
 - [ ] Gradual server/client migration from legacy subnet (`172.26.32.0/24`) to VLANs.
-- [x] Align ISP DHCP pool ranges with `/24` network (fixed 2026-08-29; pool now `172.26.0.2-172.26.0.254`).
-- [x] Relocate Epson printer from legacy `172.26.32.130` to ISP LAN `172.26.0.130` (DHCP reservation moved 2026-08-29; restart printer to take effect).
+- [x] Align ISP DHCP pool ranges with `/24` network (fixed 2026-09-29; pool now `172.26.0.2-172.26.0.254`).
+- [x] Relocate Epson printer from legacy `172.26.32.130` to ISP LAN `172.26.0.130` (DHCP reservation moved 2026-09-29; restart printer to take effect).
 
 ## Live Topology Snapshot (Latest Router Exports)
 
-Source: `config/sanitized/*-20260829-101733.sanitized.rsc`
+Source: `config/sanitized/*-20260929-192703.sanitized.rsc`
 
 ```mermaid
 flowchart TB
@@ -179,7 +179,9 @@ Notes from latest exports:
 - WAN services publish straight to VLAN20 host `172.26.20.254` (not legacy `172.26.32.250`).
 - Backend still masquerades toward ISP uplink — remove when pure routed path is fully trusted.
 - Backend legacy `dstnat` rules remain present but disabled.
-- ISP DHCP network is `/24`, but pool `dhcp_pool0` still lists `172.26.0.2–172.26.31.254` (cleanup pending).
+- ISP DHCP pool now aligned to `/24` (`172.26.0.2–172.26.0.254`); printer reservation moved to `172.26.0.130`.
+- ISP DNS servers now use internal `172.26.20.37` (PiHole) with `8.8.1.1` fallback; added static records for `grafana`, `mysql`, `netflow`/`pihole`.
+- IP traffic-flow (ipfix) enabled on both routers, target `172.26.20.36`; SNMP enabled on both routers.
 
 ## Target Network Design (After Switch/VLAN Cutover)
 
@@ -559,7 +561,7 @@ Then continue from the Pending checklist.
 
 ## Live Topology Snapshot (Latest Router Exports)
 
-Source: `config/sanitized/*-20260829-101733.sanitized.rsc`
+Source: `config/sanitized/*-20260929-192703.sanitized.rsc`
 
 ```mermaid
 flowchart TB
@@ -667,9 +669,9 @@ flowchart TB
 - **WAN publish**: ISP `dst-nat` on `Digi` forwards `TCP 443,4000` → `172.26.20.254:443` (VLAN20 webserver). Legacy `dst-nat` to `172.26.40.2` and `172.26.32.250` are **disabled**.
 - **Backend LAG**: `LAG-SWITCH-V2` (`balance-xor`, `layer-2-and-3` hash) on `ether7–10`; trunk carries VLANs 10,20,30 tagged.
 - **Bridge VLAN filtering**: `BRIDGE-LAN` has `vlan-filtering=yes`; tagged members include `BRIDGE-LAN` (CPU) and `LAG-SWITCH-V2`; access ports `ether2/3` PVID 10, `ether5` PVID 20.
-- **ISP static routes**: Four routes to `172.26.10/20/30/32.0/24` via `172.26.40.2`.
+- **ISP static routes**: Five routes to `172.26.10/20/30/32/50.0/24` via `172.26.40.2`.
 - **Backend firewall**: Accept rules for ISP (`172.26.0.0/16`) → VLAN20/VLAN30 via `UPLINK-A`; inter-VLAN allows between legacy/VLAN10/VLAN20; default-drop rules are **disabled** (tracked in Pending).
-- **DHCP pools**: ISP pool still spans old `/19` range (`172.26.0.2–172.26.31.254`); backend VLAN pools scoped to `/24` each.
+- **DHCP pools**: ISP pool aligned to `/24` (`172.26.0.2–172.26.0.254`); backend VLAN pools scoped to `/24` each.
 
 ## Network Topology (D2)
 
